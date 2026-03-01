@@ -1,1 +1,1 @@
-# palaeontology-3d-reconstruction
+# paleontology-3d-reconstruction
