@@ -100,7 +100,7 @@ angles = [
     (75, 270, 1.5),
 ]
 
-plt.figure(figsize=(20, 15))
+plt.figure(figsize=(20, 12))
 for i, (elev_t, azim_t, dist_t) in enumerate(angles):
     R_t, T_t = look_at_view_transform(dist=dist_t, elev=elev_t, azim=azim_t)
     cameras_t = FoVPerspectiveCameras(device=device, R=R_t, T=T_t)
@@ -114,11 +114,11 @@ for i, (elev_t, azim_t, dist_t) in enumerate(angles):
 
     plt.subplot(3, 4, i + 1)
     plt.imshow(sil_filled, cmap='gray')
-    plt.title(f"elev={elev_t}, azim={azim_t}\ndist={dist_t}")
+    plt.title(f"e={elev_t} az={azim_t}", fontsize=7, pad=2)
     plt.axis('off')
 
 plt.suptitle("Проекції 3D моделі евриптерида з різних кутів камери", fontsize=14)
-plt.tight_layout()
+plt.tight_layout(rect=[0, 0, 1, 0.96])
 plt.show()
 
 mask = "image3_rembg_mask.png"
