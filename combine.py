@@ -29,7 +29,7 @@ def objective(params, points, target_mask):
     union = np.count_nonzero(np.logical_or(target_mask, gen_mask))
     return 1 - (intersection / (union + 1e-6))
 
-mask = cv2.imread('image3_mask.png', cv2.IMREAD_GRAYSCALE)
+mask = cv2.imread('masks/image3_mask.png', cv2.IMREAD_GRAYSCALE)
 _, mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
 
 loaded = trimesh.load('eurypterus.glb')
@@ -61,7 +61,7 @@ res = minimize(objective, best_global_params, args=(points, mask), method='Nelde
 
 final_mask = project_3d_to_2d(res.x, points, mask.shape)
 overlap = cv2.merge([np.zeros_like(mask), final_mask, mask])
-cv2.imwrite('overlap_result.png', overlap)
+cv2.imwrite('masks_code/overlap_result.png', overlap)
 
 print(f"Final IoU: {1 - res.fun}")
 print(f"Final Params: {res.x}")

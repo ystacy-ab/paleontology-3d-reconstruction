@@ -18,7 +18,6 @@ from concurrent.futures import ThreadPoolExecutor
 device = torch.device("cpu")
 IMG_SIZE = 64
 
-print("Завантажую модель...")
 obj_filename = "3d-model.obj"
 mesh = load_objs_as_meshes([obj_filename], device=device)
 print(f"Модель завантажена: {mesh.verts_packed().shape[0]} вершин")
@@ -84,8 +83,7 @@ renderer = MeshRenderer(
     shader=SoftSilhouetteShader(blend_params=blend_params)
 )
 
-print(" Рендерер створено.")
-print("\nГенерую проекції з різних кутів (паралельно)...")
+print("\nПроекції з різних кутів (паралельно)...")
 
 angles = [
     (90,   0, 1.5),
@@ -217,7 +215,6 @@ for i in tqdm(range(Niter)):
 print(f"Оптимізація завершена. Фінальний Loss PyTorch3D: {loss_history[-1]:.4f}")
 pytorch3d_iou = 1 - loss_history[-1]
 
-plt.figure(figsize=(8, 4))
 plt.plot(loss_history, color='steelblue', linewidth=2)
 plt.title("Loss по ітераціях (PyTorch3D оптимізація)")
 plt.xlabel("Ітерація")
@@ -263,7 +260,7 @@ plt.tight_layout()
 plt.show()
 
 # ------------------------------------------------------------
-# COMPARISON
+# COMPARISON WITH COMBINE.PY
 # ------------------------------------------------------------
 combine_iou = 1 - best_loss
 
