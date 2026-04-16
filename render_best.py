@@ -1,15 +1,3 @@
-"""
-render_best.py
---------------
-Рендерить 12 проекцій 3D моделі паралельно (ThreadPoolExecutor),
-рахує IoU кожної відносно еталонної маски,
-зберігає найкращу як masks_code/pytorch3d_best.png
-і виводить результат для compare_iou.py.
-
-Запускати з кореня репо:
-    python render_best.py
-"""
-
 import torch
 from pytorch3d.io import load_objs_as_meshes
 from pytorch3d.renderer import (

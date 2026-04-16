@@ -3,7 +3,7 @@ import numpy as np
 import os
 
 def iou(mask_a, mask_b):
-    """Обидві маски — grayscale numpy arrays."""
+    """Both masks are grayscale numpy arrays."""
     a = (mask_a > 127).astype(np.uint8)
     b = (mask_b > 127).astype(np.uint8)
     intersection = np.logical_and(a, b).sum()
@@ -13,7 +13,7 @@ def iou(mask_a, mask_b):
 def load_and_binarize(path, target_shape=None):
     img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
     if img is None:
-        raise FileNotFoundError(f"Не знайдено: {path}")
+        raise FileNotFoundError(f"Not found: {path}")
     if target_shape is not None:
         img = cv2.resize(img, (target_shape[1], target_shape[0]))
     _, img = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY)
@@ -23,8 +23,8 @@ GT_PATH = "masks/image3_mask.png"
 gt = load_and_binarize(GT_PATH)
 H, W = gt.shape
 
-print(f"Еталон завантажено: {GT_PATH}  ({W}x{H})\n")
-print(f"{'Метод':<35} {'IoU':>6}")
+print(f"Ground Truth loaded: {GT_PATH}  ({W}x{H})\n")
+print(f"{'Method':<35} {'IoU':>6}")
 print("-" * 43)
 
 results = {}
@@ -39,7 +39,7 @@ if os.path.exists(OVERLAP_PATH):
     results["combine.py (Nelder-Mead)"] = score
     print(f"{'combine.py (Nelder-Mead)':<35} {score:>6.4f}")
 else:
-    print(f"{'combine.py (Nelder-Mead)':<35} {'ВІДСУТНІЙ overlap_result.png':>6}")
+    print(f"{'combine.py (Nelder-Mead)':<35} {'MISSING overlap_result.png':>6}")
 
 REMBG_PATH = "masks_code/image3_rembg_mask.png"
 if os.path.exists(REMBG_PATH):
@@ -48,14 +48,14 @@ if os.path.exists(REMBG_PATH):
     results["test_rembg.py (rembg AI)"] = score
     print(f"{'test_rembg.py (rembg AI)':<35} {score:>6.4f}")
 else:
-    print(f"{'test_rembg.py (rembg AI)':<35} {'ВІДСУТНІЙ masks_code/image3_rembg_mask.png':>6}")
+    print(f"{'test_rembg.py (rembg AI)':<35} {'MISSING masks_code/image3_rembg_mask.png':>6}")
 
 CV_OTSU_PATH = "masks_code/fossil_otsu.png"
 CV_SIMPLE_PATH = "masks_code/fossil_simple.png"
 CV_ADAPTIVE_PATH = "masks_code/fossil_adaptive.png"
 
 if not os.path.exists(CV_OTSU_PATH):
-    print("\n[!] CV маски не знайдено — генерую зараз...")
+    print("\n[!] CV masks not found — generating now...")
     image = cv2.imread('images/image3.jpg')
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (7, 7), 0)
@@ -67,7 +67,7 @@ if not os.path.exists(CV_OTSU_PATH):
     cv2.imwrite(CV_SIMPLE_PATH, thresh_simple)
     cv2.imwrite(CV_OTSU_PATH, thresh_otsu)
     cv2.imwrite(CV_ADAPTIVE_PATH, thresh_adaptive)
-    print("    CV маски збережено.")
+    print("    CV masks saved.")
 
 for label, path in [
     ("test_cv.py (Otsu threshold)", CV_OTSU_PATH),
@@ -87,16 +87,14 @@ if os.path.exists(PYTORCH3D_PATH):
     results["render_silhouette.py (PyTorch3D)"] = score
     print(f"{'render_silhouette.py (PyTorch3D)':<35} {score:>6.4f}")
 else:
-    print(f"\n[!] render_silhouette.py (PyTorch3D): маска не знайдена.")
-    print(f"    Збери найкращу проекцію з render_silhouette.py і збережи як:")
+    print(f"\n[!] render_silhouette.py (PyTorch3D): mask not found.")
+    print(f"    Save the best projection from render_silhouette.py as:")
     print(f"    masks_code/pytorch3d_best.png")
-    print(f"    Потім запусти цей скрипт ще раз.")
+    print(f"    Then run this script again.")
 
 if results:
     print("\n" + "=" * 43)
     best = max(results, key=results.get)
-    print(f"Найкращий метод: {best}")
-    print(f"IoU:             {results[best]:.4f}")
+    print(f"Best Method: {best}")
+    print(f"IoU:         {results[best]:.4f}")
     print("=" * 43)
-
-   
