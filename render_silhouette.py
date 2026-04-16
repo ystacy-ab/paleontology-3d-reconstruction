@@ -121,7 +121,7 @@ plt.suptitle("Проекції 3D моделі евриптерида з різ�
 plt.tight_layout(rect=[0, 0, 1, 0.96])
 plt.show()
 
-mask = "image3_rembg_mask.png"
+mask = "masks/image3_mask.png"
 
 mask_img = cv2.imread(mask, cv2.IMREAD_GRAYSCALE)
 mask_img = cv2.resize(mask_img, (IMG_SIZE, IMG_SIZE))
