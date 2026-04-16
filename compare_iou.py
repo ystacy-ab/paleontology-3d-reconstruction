@@ -2,9 +2,6 @@ import cv2
 import numpy as np
 import os
 
-# ──────────────────────────────────────────────
-# Утиліта IoU
-# ──────────────────────────────────────────────
 def iou(mask_a, mask_b):
     """Обидві маски — grayscale numpy arrays."""
     a = (mask_a > 127).astype(np.uint8)
@@ -22,9 +19,6 @@ def load_and_binarize(path, target_shape=None):
     _, img = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY)
     return img
 
-# ──────────────────────────────────────────────
-# Еталонна маска (Людина А, ручна)
-# ──────────────────────────────────────────────
 GT_PATH = "masks/image3_mask.png"
 gt = load_and_binarize(GT_PATH)
 H, W = gt.shape
@@ -35,15 +29,11 @@ print("-" * 43)
 
 results = {}
 
-# ──────────────────────────────────────────────
-# Метод 1: combine.py — overlap_result.png
-# Маска моделі збережена у зеленому каналі overlap
-# ──────────────────────────────────────────────
 OVERLAP_PATH = "overlap_result.png"
 if os.path.exists(OVERLAP_PATH):
     overlap = cv2.imread(OVERLAP_PATH)
-    # overlap = [0=zeros, 1=final_mask(green), 2=gt_mask(red)] у BGR
-    model_mask = overlap[:, :, 1]   # зелений канал = final_mask
+    # overlap = [0=zeros, 1=final_mask(green), 2=gt_mask(red)] 
+    model_mask = overlap[:, :, 1]   
     model_mask = cv2.resize(model_mask, (W, H))
     score = iou(gt, model_mask)
     results["combine.py (Nelder-Mead)"] = score
@@ -51,9 +41,6 @@ if os.path.exists(OVERLAP_PATH):
 else:
     print(f"{'combine.py (Nelder-Mead)':<35} {'ВІДСУТНІЙ overlap_result.png':>6}")
 
-# ──────────────────────────────────────────────
-# Метод 2: test_rembg.py — вже є готова маска
-# ──────────────────────────────────────────────
 REMBG_PATH = "masks_code/image3_rembg_mask.png"
 if os.path.exists(REMBG_PATH):
     rembg_mask = load_and_binarize(REMBG_PATH, target_shape=(H, W))
@@ -63,10 +50,6 @@ if os.path.exists(REMBG_PATH):
 else:
     print(f"{'test_rembg.py (rembg AI)':<35} {'ВІДСУТНІЙ masks_code/image3_rembg_mask.png':>6}")
 
-# ──────────────────────────────────────────────
-# Метод 3: test_cv.py — OpenCV Otsu threshold
-# Запускаємо генерацію масок якщо їх ще нема
-# ──────────────────────────────────────────────
 CV_OTSU_PATH = "masks_code/fossil_otsu.png"
 CV_SIMPLE_PATH = "masks_code/fossil_simple.png"
 CV_ADAPTIVE_PATH = "masks_code/fossil_adaptive.png"
@@ -97,10 +80,6 @@ for label, path in [
         results[label] = score
         print(f"{label:<35} {score:>6.4f}")
 
-# ──────────────────────────────────────────────
-# Метод 4: render_silhouette.py (PyTorch3D)
-# Найкращий ракурс зберігаємо окремо
-# ──────────────────────────────────────────────
 PYTORCH3D_PATH = "masks_code/pytorch3d_best.png"
 if os.path.exists(PYTORCH3D_PATH):
     p3d_mask = load_and_binarize(PYTORCH3D_PATH, target_shape=(H, W))
@@ -113,9 +92,6 @@ else:
     print(f"    masks_code/pytorch3d_best.png")
     print(f"    Потім запусти цей скрипт ще раз.")
 
-# ──────────────────────────────────────────────
-# Підсумок
-# ──────────────────────────────────────────────
 if results:
     print("\n" + "=" * 43)
     best = max(results, key=results.get)
@@ -123,18 +99,4 @@ if results:
     print(f"IoU:             {results[best]:.4f}")
     print("=" * 43)
 
-    # # LaTeX таблиця для звіту
-    # print("\n% ── Вставити у звіт (LaTeX) ──────────────────")
-    # print("\\begin{table}[htbp]")
-    # print("\\caption{Порівняння методів сегментації (IoU відносно ручної маски)}")
-    # print("\\begin{center}")
-    # print("\\begin{tabular}{|l|c|}")
-    # print("\\hline")
-    # print("\\textbf{Метод} & \\textbf{IoU} \\\\")
-    # print("\\hline")
-    # for method, score in sorted(results.items(), key=lambda x: -x[1]):
-    #     print(f"{method} & {score:.4f} \\\\")
-    # print("\\hline")
-    # print("\\end{tabular}")
-    # print("\\end{center}")
-    # print("\\end{table}")
+   
