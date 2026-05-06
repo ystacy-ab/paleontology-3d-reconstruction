@@ -13,6 +13,12 @@ fossil_reconstruction.py
   • Кількість процесів задається у GUI (1–16).
   • Пошук кута: N процесів ділять між собою список кутів.
   • Оптимізація: torch.no_grad() там де градієнти не потрібні.
+
+ОПТИМІЗАЦІЯ ДЕФОРМАЦІЇ:
+  • Двофазна: фаза 1 (груба, швидка) → фаза 2 (точна, якісна)
+  • Рання зупинка в обох фазах — якщо Loss не покращується
+  • Smoothness loss — штрафує за різкі перепади між сусідніми
+    вершинами, деформація залишається плавною і реалістичною
 """
 
 import os
@@ -133,6 +139,10 @@ SEARCH_ANGLES = [
     (85, 45),  (85, 135), (85, 225), (85, 315),
 ]
 
+# Константи ранньої зупинки
+EARLY_STOP_WINDOW = 30   # скільки ітерацій дивимось назад
+EARLY_STOP_DELTA  = 1e-4 # мінімальне покращення щоб продовжувати
+
 
 class Fossil3DReconstructor:
     """
@@ -148,14 +158,25 @@ class Fossil3DReconstructor:
         device: str = "cpu",
     ):
         self.obj_path = obj_path
-        self.mask_raw = mask            # зберігаємо для воркерів (numpy, серіалізується)
+        self.mask_raw = mask
         self.img_size = img_size
         self.device = torch.device(device)
 
         self.blend_params = BlendParams(sigma=1e-4, gamma=1e-4)
-        self.raster_settings = RasterizationSettings(
+        blur_radius = np.log(1.0 / 1e-4 - 1.0) * self.blend_params.sigma
+
+        # Грубий растеризатор — для фази 1 (швидко)
+        self.raster_coarse = RasterizationSettings(
             image_size=img_size,
-            blur_radius=np.log(1.0 / 1e-4 - 1.0) * self.blend_params.sigma,
+            blur_radius=blur_radius,
+            faces_per_pixel=10,
+            cull_backfaces=False,
+        )
+
+        # Точний растеризатор — для фази 2 (якісно)
+        self.raster_fine = RasterizationSettings(
+            image_size=img_size,
+            blur_radius=blur_radius,
             faces_per_pixel=50,
             cull_backfaces=False,
         )
@@ -174,11 +195,13 @@ class Fossil3DReconstructor:
         scale = (verts - center).abs().max()
         return mesh.offset_verts(-center).scale_verts(1.0 / scale.item())
 
-    def _make_renderer(self, elev: float, azim: float, dist: float = 1.5) -> MeshRenderer:
+    def _make_renderer(self, elev: float, azim: float,
+                       dist: float = 1.5, coarse: bool = False) -> MeshRenderer:
         R, T = look_at_view_transform(dist=dist, elev=elev, azim=azim)
         cameras = FoVPerspectiveCameras(device=self.device, R=R, T=T)
+        raster = self.raster_coarse if coarse else self.raster_fine
         return MeshRenderer(
-            rasterizer=MeshRasterizer(cameras=cameras, raster_settings=self.raster_settings),
+            rasterizer=MeshRasterizer(cameras=cameras, raster_settings=raster),
             shader=SoftSilhouetteShader(blend_params=self.blend_params),
         )
 
@@ -187,6 +210,27 @@ class Fossil3DReconstructor:
         intersection = (pred * self.target_silhouette).sum()
         union = pred.sum() + self.target_silhouette.sum() - intersection
         return 1.0 - intersection / (union + 1e-8)
+
+    # ── SMOOTHNESS LOSS ────────────────────────────────────────────────
+    def _smoothness_loss(self, deform_verts: torch.Tensor) -> torch.Tensor:
+        """
+        Штрафує за різкі перепади між сусідніми вершинами меша.
+        Для кожного ребра рахує різницю деформацій двох кінців —
+        чим більша різниця тим більший штраф.
+        Забезпечує плавність і реалістичність деформації.
+        """
+        edges = self.mesh.edges_packed()
+        v0 = deform_verts[edges[:, 0]]
+        v1 = deform_verts[edges[:, 1]]
+        return ((v0 - v1) ** 2).sum(dim=1).mean()
+
+    def _total_loss(self, pred: torch.Tensor,
+                    deform_verts: torch.Tensor) -> torch.Tensor:
+        """Повна функція втрат: IoU + regularization + smoothness."""
+        iou_loss    = self._iou_loss(pred)
+        reg_loss    = deform_verts.norm(dim=1).mean() * 0.01
+        smooth_loss = self._smoothness_loss(deform_verts) * 0.001
+        return iou_loss + reg_loss + smooth_loss
 
     # ── ПАРАЛЕЛЬНИЙ ПОШУК КУТА ─────────────────────────────────────────
 
@@ -198,10 +242,8 @@ class Fossil3DReconstructor:
         """
         Паралельний пошук кута через multiprocessing.Pool.
         Кожен процес незалежно рендерить силует і повертає IoU loss.
-
         Returns: (best_elev, best_azim, best_loss, elapsed_sec)
         """
-        # Підготовка аргументів: numpy-масив серіалізується між процесами
         worker_args = [
             (elev, azim, self.obj_path, self.mask_raw, self.img_size)
             for elev, azim in SEARCH_ANGLES
@@ -210,7 +252,6 @@ class Fossil3DReconstructor:
         t0 = time.time()
         results = []
 
-        # spawn — єдиний безпечний метод для PyTorch + multiprocessing
         ctx = mp.get_context("spawn")
         with ctx.Pool(processes=num_workers) as pool:
             for i, result in enumerate(pool.imap_unordered(_angle_worker, worker_args)):
@@ -222,7 +263,7 @@ class Fossil3DReconstructor:
         best_loss, best_elev, best_azim = min(results, key=lambda x: x[0])
         return best_elev, best_azim, best_loss, elapsed
 
-    # ── ОПТИМІЗАЦІЯ ДЕФОРМАЦІЇ ─────────────────────────────────────────
+    # ── ДВОФАЗНА ОПТИМІЗАЦІЯ ДЕФОРМАЦІЇ ───────────────────────────────
 
     def optimize_deformation(
         self,
@@ -232,45 +273,91 @@ class Fossil3DReconstructor:
         progress_callback=None,
     ) -> tuple[Meshes, torch.Tensor, list[float], float]:
         """
-        Оптимізує деформацію вершин під маску (однопотоково,
-        PyTorch autograd — тут паралелізація не дає переваги).
+        Двофазна оптимізація деформації вершин:
+
+        Фаза 1 — груба (швидка):
+          faces_per_pixel=10, lr=0.005
+          Швидко знаходить загальну форму.
+          Рання зупинка: якщо Loss не змінюється 30 іт. → стоп.
+
+        Фаза 2 — точна (якісна):
+          faces_per_pixel=50, lr=0.001
+          Уточнює деталі країв і кінцівок.
+          Рання зупинка: якщо Loss не змінюється 30 іт. → стоп.
+
+        Smoothness loss в обох фазах забезпечує плавність деформації.
         """
         t0 = time.time()
-        renderer = self._make_renderer(elev, azim)   # один рендерер на весь цикл
+
+        # Ділимо ітерації порівну між фазами
+        phase1_max = iterations // 2
+        phase2_max = iterations - phase1_max
 
         deform_verts = torch.zeros(
             self.mesh.verts_packed().shape,
             device=self.device,
             requires_grad=True,
         )
-        optimizer = torch.optim.Adam([deform_verts], lr=0.002)
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=200, gamma=0.5)
 
         loss_history: list[float] = []
-        for i in tqdm(range(iterations), desc="Оптимізація"):
-            optimizer.zero_grad()
+
+        # ── ФАЗА 1: груба оптимізація ──────────────────────────────
+        renderer1 = self._make_renderer(elev, azim, coarse=True)
+        optimizer1 = torch.optim.Adam([deform_verts], lr=0.005)
+
+        for i in tqdm(range(phase1_max), desc="Фаза 1 (груба)"):
+            optimizer1.zero_grad()
             deformed = self.mesh.offset_verts(deform_verts)
-            sil = renderer(deformed)[0, ..., 3]
-
-            iou_loss = self._iou_loss(sil)
-            reg_loss = deform_verts.norm(dim=1).mean() * 0.01
-            loss = iou_loss + reg_loss
-
+            sil = renderer1(deformed)[0, ..., 3]
+            loss = self._total_loss(sil, deform_verts)
             loss.backward()
-            optimizer.step()
-            scheduler.step()
+            optimizer1.step()
             loss_history.append(loss.item())
 
             if progress_callback:
                 progress_callback(i + 1, iterations)
 
+            # Рання зупинка фази 1
+            if i >= EARLY_STOP_WINDOW:
+                improvement = loss_history[-EARLY_STOP_WINDOW] - loss_history[-1]
+                if improvement < EARLY_STOP_DELTA:
+                    break
+
+        phase1_end = len(loss_history)
+
+        # ── ФАЗА 2: точна оптимізація ──────────────────────────────
+        renderer2 = self._make_renderer(elev, azim, coarse=False)
+        optimizer2 = torch.optim.Adam([deform_verts], lr=0.001)
+        scheduler2 = torch.optim.lr_scheduler.StepLR(
+            optimizer2, step_size=50, gamma=0.5
+        )
+
+        for i in tqdm(range(phase2_max), desc="Фаза 2 (точна)"):
+            optimizer2.zero_grad()
+            deformed = self.mesh.offset_verts(deform_verts)
+            sil = renderer2(deformed)[0, ..., 3]
+            loss = self._total_loss(sil, deform_verts)
+            loss.backward()
+            optimizer2.step()
+            scheduler2.step()
+            loss_history.append(loss.item())
+
+            if progress_callback:
+                progress_callback(phase1_end + i + 1, iterations)
+
+            # Рання зупинка фази 2
+            if i >= EARLY_STOP_WINDOW:
+                improvement = loss_history[-EARLY_STOP_WINDOW] - loss_history[-1]
+                if improvement < EARLY_STOP_DELTA:
+                    break
+
         elapsed = time.time() - t0
         final_mesh = self.mesh.offset_verts(deform_verts.detach())
 
         with torch.no_grad():
-            final_sil = renderer(final_mesh)[0, ..., 3].detach()
+            final_sil = renderer2(final_mesh)[0, ..., 3].detach()
 
-        return final_mesh, final_sil, loss_history, elapsed
+        return final_mesh, final_sil, loss_history, elapsed, phase1_end
 
     # ── ЗБЕРЕЖЕННЯ ─────────────────────────────────────────────────────
 
@@ -285,20 +372,12 @@ class Fossil3DReconstructor:
         self,
         final_sil: torch.Tensor,
         loss_history: list[float],
+        phase1_end: int,
         best_elev: float,
         best_azim: float,
         search_time: float,
         opt_time: float,
     ) -> None:
-        """
-        Відображає:
-          • Маска відбитку
-          • Оптимізована проекція
-          • Різниця (overlay)
-          • Положення моделі у відбитку (overlay)
-          • Графік IoU loss
-          • Зведення часу
-        """
         target = self.target_silhouette.cpu().numpy()
         pred = final_sil.cpu().numpy()
         diff = np.abs(pred - target)
@@ -313,40 +392,40 @@ class Fossil3DReconstructor:
         )
         gs = gridspec.GridSpec(2, 4, figure=fig, hspace=0.4, wspace=0.35)
 
-        # — Маска відбитку
         ax0 = fig.add_subplot(gs[0, 0])
         ax0.imshow(target, cmap="gray")
         ax0.set_title("Маска відбитку")
         ax0.axis("off")
 
-        # — Проекція моделі
         ax1 = fig.add_subplot(gs[0, 1])
         ax1.imshow(pred, cmap="gray")
         ax1.set_title("Проекція моделі")
         ax1.axis("off")
 
-        # — Різниця
         ax2 = fig.add_subplot(gs[0, 2])
         ax2.imshow(diff, cmap="hot")
         ax2.set_title(f"Різниця (IoU={final_iou:.3f})")
         ax2.axis("off")
 
-        # — Overlay: положення моделі у відбитку
         ax3 = fig.add_subplot(gs[0, 3])
         overlay = np.stack([target, pred, np.zeros_like(target)], axis=-1)
         ax3.imshow(overlay)
-        ax3.set_title("Положення моделі\nу відбитку (R=маска, G=проекція)")
+        ax3.set_title("Положення моделі\nу відбитку")
         ax3.axis("off")
 
-        # — Графік втрат
+        # Графік з двома фазами
         ax4 = fig.add_subplot(gs[1, :2])
-        ax4.plot(loss_history, color="#2196F3", linewidth=1.5)
-        ax4.set_title("Графік IoU Loss (оптимізація)")
+        ax4.plot(range(phase1_end), loss_history[:phase1_end],
+                 color="#2196F3", linewidth=1.5, label="Фаза 1 (груба)")
+        ax4.plot(range(phase1_end, len(loss_history)), loss_history[phase1_end:],
+                 color="#FF9800", linewidth=1.5, label="Фаза 2 (точна)")
+        ax4.axvline(x=phase1_end, color="gray", linestyle=":", alpha=0.7)
+        ax4.set_title("Графік IoU Loss — двофазна оптимізація")
         ax4.set_xlabel("Ітерація")
         ax4.set_ylabel("Loss")
+        ax4.legend()
         ax4.grid(True, alpha=0.3)
 
-        # — Зведення часу
         ax5 = fig.add_subplot(gs[1, 2:])
         ax5.axis("off")
         time_data = [
@@ -357,7 +436,9 @@ class Fossil3DReconstructor:
             ["Найкращий elev", f"{best_elev}°"],
             ["Найкращий azim", f"{best_azim}°"],
             ["Фінальний IoU", f"{final_iou:.4f}"],
-            ["Кількість ітерацій", f"{len(loss_history)}"],
+            ["Всього ітерацій", f"{len(loss_history)}"],
+            ["Фаза 1 ітерацій", f"{phase1_end}"],
+            ["Фаза 2 ітерацій", f"{len(loss_history) - phase1_end}"],
         ]
         table = ax5.table(
             cellText=time_data,
@@ -371,7 +452,7 @@ class Fossil3DReconstructor:
         ax5.set_title("Зведення результатів", pad=10)
 
         plt.savefig("reconstruction_result.png", dpi=150, bbox_inches="tight")
-        plt.show()
+        plt.close(fig)
 
 
 # ══════════════════════════════════════════════════════════
@@ -392,7 +473,6 @@ class FossilApp:
         self.threads_var = tk.IntVar(value=min(4, mp.cpu_count()))
         self.iterations_var = tk.IntVar(value=500)
 
-        # прогрес-бари
         self.search_progress = tk.DoubleVar(value=0)
         self.opt_progress = tk.DoubleVar(value=0)
 
@@ -401,7 +481,6 @@ class FossilApp:
     def _build_ui(self):
         pad = {"padx": 12, "pady": 6}
 
-        # ── Файл ──────────────────────────────────────────
         frame_file = tk.LabelFrame(self.root, text="Зображення відбитку", **pad)
         frame_file.pack(fill="x", **pad)
 
@@ -411,7 +490,6 @@ class FossilApp:
         tk.Button(frame_file, text="Огляд…", command=self._choose_image,
                   width=8).pack(side="right")
 
-        # ── Параметри ─────────────────────────────────────
         frame_params = tk.LabelFrame(self.root, text="Параметри", **pad)
         frame_params.pack(fill="x", **pad)
 
@@ -430,7 +508,6 @@ class FossilApp:
         tk.Spinbox(row2, from_=100, to=2000, increment=100,
                    textvariable=self.iterations_var, width=6).pack(side="left")
 
-        # ── Прогрес ───────────────────────────────────────
         frame_prog = tk.LabelFrame(self.root, text="Прогрес", **pad)
         frame_prog.pack(fill="x", **pad)
 
@@ -442,7 +519,6 @@ class FossilApp:
         ttk.Progressbar(frame_prog, variable=self.opt_progress,
                         maximum=100).pack(fill="x", padx=4, pady=2)
 
-        # ── Статус + кнопка ───────────────────────────────
         tk.Label(self.root, textvariable=self.status_var,
                  fg="#1565C0", anchor="w").pack(fill="x", **pad)
 
@@ -454,17 +530,13 @@ class FossilApp:
             height=2,
         ).pack(fill="x", padx=12, pady=8)
 
-    # ── Допоміжні ─────────────────────────────────────────────────────
-
     def _choose_image(self):
         path = filedialog.askopenfilename(
             filetypes=[("Зображення", "*.jpg *.jpeg *.png")]
         )
         if path:
             self.image_path = path
-            self.file_label.config(
-                text=os.path.basename(path), fg="black"
-            )
+            self.file_label.config(text=os.path.basename(path), fg="black")
 
     def _set_status(self, text: str):
         self.root.after(0, self.status_var.set, text)
@@ -484,8 +556,6 @@ class FossilApp:
         self._set_status("⏳  Обробка зображення…")
         Thread(target=self._pipeline, daemon=True).start()
 
-    # ── Основний пайплайн ─────────────────────────────────────────────
-
     def _pipeline(self):
         try:
             # 1. Маска
@@ -496,6 +566,7 @@ class FossilApp:
             reconstructor = Fossil3DReconstructor(
                 obj_path=self.OBJ_PATH,
                 mask=mask,
+                img_size=64,
             )
 
             # 2. Паралельний пошук кута
@@ -515,9 +586,9 @@ class FossilApp:
                 f"(elev={best_elev}°, azim={best_azim}°). Оптимізація…"
             )
 
-            # 3. Оптимізація деформації
+            # 3. Двофазна оптимізація деформації
             iters = self.iterations_var.get()
-            final_mesh, final_sil, loss_history, opt_time = (
+            final_mesh, final_sil, loss_history, opt_time, phase1_end = (
                 reconstructor.optimize_deformation(
                     best_elev, best_azim,
                     iterations=iters,
@@ -526,28 +597,42 @@ class FossilApp:
             )
             self._update_opt_bar(iters, iters)
 
-            # 4. Збереження
+            # 4. Збереження деформованої моделі
             out_path = "final_deformed_model.obj"
             reconstructor.save_mesh(final_mesh, out_path)
 
+            final_iou = 1.0 - loss_history[-1]
             total = search_time + opt_time
             self._set_status(
-                f"✅  Готово! {out_path}  |  "
+                f"Готово! {out_path}  |  IoU={final_iou:.4f}  |  "
                 f"Пошук: {search_time:.1f} с  "
                 f"Оптимізація: {opt_time:.1f} с  "
                 f"Разом: {total:.1f} с"
             )
-
-            # 5. Візуалізація
             reconstructor.visualize_result(
-                final_sil, loss_history,
+                final_sil, loss_history, phase1_end,
                 best_elev, best_azim,
                 search_time, opt_time,
             )
+            self.root.after(0, self._open_result_image)
 
         except Exception as exc:
             self._set_status(f"❌  Помилка: {exc}")
             import traceback; traceback.print_exc()
+
+    def _open_result_image(self):
+        """Відкриває збережений PNG у системному переглядачі."""
+        import subprocess
+        import platform
+        try:
+            if platform.system() == "Darwin":
+                subprocess.Popen(["open", "reconstruction_result.png"])
+            elif platform.system() == "Windows":
+                os.startfile("reconstruction_result.png")
+            else:
+                subprocess.Popen(["xdg-open", "reconstruction_result.png"])
+        except Exception:
+            pass
 
     def run(self):
         self.root.mainloop()
@@ -558,7 +643,6 @@ class FossilApp:
 # ══════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    # ОБОВ'ЯЗКОВО для Windows + macOS (spawn context)
     mp.freeze_support()
 
     if not os.path.exists(FossilApp.OBJ_PATH):
