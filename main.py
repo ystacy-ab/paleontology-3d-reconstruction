@@ -1,5 +1,4 @@
 import os
-import sys
 import time
 import cv2
 import torch
@@ -158,24 +157,11 @@ class Fossil3DReconstructor:
         v1 = deform_verts[edges[:, 1]]
         return ((v0 - v1) ** 2).sum(dim=1).mean()
 
-    def _symmetry_loss(self, deform_verts: torch.Tensor) -> torch.Tensor:
-        verts = self.mesh.verts_packed()
-        left_mask  = verts[:, 0] < 0
-        right_mask = verts[:, 0] > 0
-        left_deform  = deform_verts[left_mask]
-        right_deform = deform_verts[right_mask]
-        n = min(left_deform.shape[0], right_deform.shape[0])
-        if n == 0:
-            return torch.tensor(0.0, device=self.device)
-        left_mirrored = left_deform[:n].clone()
-        left_mirrored[:, 0] = -left_mirrored[:, 0]
-        return ((right_deform[:n] - left_mirrored) ** 2).mean()
-
     def _total_loss(self, pred: torch.Tensor,
                     deform_verts: torch.Tensor) -> torch.Tensor:
         iou_loss    = self._iou_loss(pred)
         reg_loss    = deform_verts.norm(dim=1).mean() * 0.01
-        smooth_loss = self._smoothness_loss(deform_verts) * 0.1
+        smooth_loss = self._smoothness_loss(deform_verts) * 0.001
         return iou_loss + reg_loss + smooth_loss
 
     def find_best_initial_angle(
@@ -218,7 +204,7 @@ class Fossil3DReconstructor:
         loss_history: list[float] = []
 
         renderer1 = self._make_renderer(elev, azim, coarse=True)
-        optimizer1 = torch.optim.Adam([deform_verts], lr=0.002)
+        optimizer1 = torch.optim.Adam([deform_verts], lr=0.005)
 
         for i in tqdm(range(phase1_max), desc="Phase 1 (coarse)"):
             optimizer1.zero_grad()
@@ -227,8 +213,6 @@ class Fossil3DReconstructor:
             loss = self._total_loss(sil, deform_verts)
             loss.backward()
             optimizer1.step()
-            with torch.no_grad():
-                deform_verts[:, 2] *= 0.1
             loss_history.append(loss.item())
             if progress_callback:
                 progress_callback(i + 1, iterations)
@@ -253,8 +237,6 @@ class Fossil3DReconstructor:
             loss.backward()
             optimizer2.step()
             scheduler2.step()
-            with torch.no_grad():
-                deform_verts[:, 2] *= 0.1
             loss_history.append(loss.item())
             if progress_callback:
                 progress_callback(phase1_end + i + 1, iterations)
