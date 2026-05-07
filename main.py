@@ -355,7 +355,7 @@ class FossilApp:
 
         self.status_var = tk.StringVar(value="Ready")
         self.threads_var = tk.IntVar(value=min(4, mp.cpu_count()))
-        self.iterations_var = tk.IntVar(value=500)
+        self.img_size_var = tk.IntVar(value=64)
         self.search_progress = tk.DoubleVar(value=0)
         self.opt_progress = tk.DoubleVar(value=0)
 
@@ -385,10 +385,12 @@ class FossilApp:
 
         row2 = tk.Frame(frame_params)
         row2.pack(fill="x", pady=4)
-        tk.Label(row2, text="Optimization iterations:", width=32,
+        tk.Label(row2, text="Image resolution:", width=32,
                  anchor="w").pack(side="left")
-        tk.Spinbox(row2, from_=100, to=2000, increment=100,
-                   textvariable=self.iterations_var, width=6).pack(side="left")
+        for val in [64, 128, 256]:
+            tk.Radiobutton(row2, text=str(val), variable=self.img_size_var,
+                           value=val).pack(side="left", padx=4)
+        tk.Label(row2, text="px", fg="gray").pack(side="left")
 
         frame_prog = tk.LabelFrame(self.root, text="Progress", **pad)
         frame_prog.pack(fill="x", **pad)
@@ -441,10 +443,11 @@ class FossilApp:
             mask = ImageProcessor(self.image_path).generate_mask()
             self._set_status("Mask created. Loading model...")
 
+            img_size = self.img_size_var.get()
             reconstructor = Fossil3DReconstructor(
                 obj_path=self.OBJ_PATH,
                 mask=mask,
-                img_size=64,
+                img_size=img_size,
             )
 
             n_workers = self.threads_var.get()
@@ -463,7 +466,7 @@ class FossilApp:
                 f"(elev={best_elev}, azim={best_azim}). Optimizing..."
             )
 
-            iters = self.iterations_var.get()
+            iters = 500
             final_mesh, final_sil, loss_history, opt_time, phase1_end = (
                 reconstructor.optimize_deformation(
                     best_elev, best_azim,
